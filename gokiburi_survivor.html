@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>ゴキブリ・サバイバー（スマホ対応完全版）</title>
+  <style>
+    * { box-sizing: border-box; user-select: none; -webkit-user-select: none; }
+    body { margin:0; min-height:100vh; display:grid; place-items:center; background:#151a20; color:#f7f3e8; font-family:system-ui, "Yu Gothic UI", sans-serif; overflow:hidden; touch-action: none; }
+    #game { position:relative; width:min(100vw, 960px); aspect-ratio:16/10; border:3px solid #9d793e; border-radius:12px; overflow:hidden; box-shadow:0 18px 55px #0009; background:#263327; }
+    canvas { width:100%; height:100%; display:block; }
+    #hud { position:absolute; inset:0; pointer-events:none; padding:14px; font-weight:800; text-shadow:1px 1px 2px #000; font-size:clamp(11px, 1.7vw, 18px); }
+    #top { display:flex; justify-content:space-between; gap:10px; flex-wrap: wrap; }
+    #weapons { position:absolute; left:14px; bottom:12px; line-height:1.4; max-width: 50%; }
+    .active { color:#ffd65a; }
+    .locked { color:#c9c9c9; opacity:.8; }
+    #notice { position:absolute; top:22%; left:50%; transform:translateX(-50%); text-align:center; font-size:clamp(16px, 3vw, 31px); color:#ffe36f; opacity:0; transition:opacity .2s; white-space:nowrap; }
+    #help { position:absolute; right:14px; bottom:12px; text-align:right; line-height:1.45; font-size:.85em; opacity:.9; }
+    #overlay { position:absolute; inset:0; display:grid; place-items:center; background:#10151dcc; text-align:center; pointer-events:auto; z-index: 10; }
+    #overlay h1 { margin:0 0 10px; font-size:clamp(24px, 5vw, 52px); color:#ffdc6a; }
+    #overlay p { margin:7px; font-size:clamp(12px, 2vw, 19px); }
+    button { margin-top:15px; border:0; border-radius:8px; padding:11px 22px; font:inherit; font-weight:800; background:#f0b642; color:#241809; cursor:pointer; }
+    button:disabled { opacity:.48; cursor:default; }
+    
+    /* スマホ用タッチUI */
+    .touch-element { display: none; position: absolute; pointer-events: auto; }
+    @media (pointer: coarse) {
+      .touch-element { display: block; }
+      #help { display: none; }
+    }
+    #joystick-zone { left: 40px; bottom: 40px; width: 120px; height: 120px; background: rgba(255,255,255,0.1); border: 2px solid rgba(255,255,255,0.4); border-radius: 50%; }
+    #joystick-stick { left: 40px; top: 40px; width: 40px; height: 40px; background: rgba(255,255,255,0.7); border-radius: 50%; position: absolute; }
+    #action-zone { right: 40px; bottom: 40px; display: flex; gap: 15px; }
+    .touch-btn { width: 65px; height: 65px; border-radius: 50%; border: none; font-weight: bold; font-size: 14px; display: grid; place-items: center; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
+    #btn-shoot { background: #ff4a4a; color: white; }
+    #btn-bomb { background: #ffcc00; color: black; }
+    #btn-weapon { background: #4a90e2; color: white; }
+  </style>
+</head>
+<body>
+  <main id="game" aria-label="ゴキブリ・サバイバー">
+    <canvas id="canvas" width="960" height="600"></canvas>
+    
+    <!-- スマホ専用バーチャルパッド -->
+    <div id="joystick-zone" class="touch-element">
+      <div id="joystick-stick"></div>
+    </div>
+    <div id="action-zone" class="touch-element">
+      <button id="btn-weapon" class="touch-btn">武器</button>
+      <button id="btn-bomb" class="touch-btn">💣</button>
+      <button id="btn-shoot" class="touch-btn">攻撃</button>
+    </div>
+
+    <section id="hud">
+      <div id="top"><span id="hp">❤️ HP: 5 / 5</span><span id="ammo">🔸 弾薬: 60 / 120</span><span id="score">スコア: 0　撃破: 0</span><span id="time">生存: 0秒</span></div>
+      <div id="weapons"></div>
+      <div id="help">移動: WASD / 矢印キー<br>照準・射撃: マウス＋クリック<br>爆弾: Eキー / Qキー</div>
+      <div id="notice"></div>
+    </section>
+    <div id="overlay"><div><h1>🪳 ゴキブリ・サバイバー</h1><p>ゴキブリを撃退して生き残れ！</p><p>スマホ対応版：画面のコントローラーで操作可能</p><button id="start">ゲーム開始</button></div></div>
+  </main>
+<script>
+(() => {
+  const canvas = document.querySelector('#canvas'), ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const game = document.querySelector('#game'), overlay = document.querySelector('#overlay');
+  const hpEl = document.querySelector('#hp'), ammoEl = document.querySelector('#ammo'), scoreEl = document.querySelector('#score'), timeEl = document.querySelector('#time');
+  const weaponsEl = document.querySelector('#weapons'), noticeEl = document.querySelector('#notice');
+  const saveKey='gokiburi-survivor-progress-v1';
+  let progress={coins:0,spherePacks:0,laserUnlocked:true,developerMode:false};
+  let keys = {}, mouse = {x:W/2,y:H/2,down:false}, running = false, last = 0, startAt = 0, nextSpawn = 0, nextShot = 0, boostEnds = 0, bombCooldownUntil = 0;
+  let player, enemies, bullets, aoeEffects, floorDust, bomb, ammo, score, kills, shotgunUnlocked, rifleUnlocked, weapon, noticeTimer;
+
+  let touchInput = { x: 0, y: 0 };
+  let isMobile = false;
+
+  function reset() {
+    player = {x:W/2,y:H/2,r:17,hp:5,maxHp:5,invincible:0,angle:0}; enemies=[]; bullets=[]; aoeEffects=[]; floorDust=Array.from({length:260},()=>({x:Math.random()*W,y:Math.random()*H,r:Math.random()*2+.35,a:Math.random()*.24+.05})); bomb=null; ammo=120;
+    score=0; kills=0; shotgunUnlocked=false; rifleUnlocked=false; weapon='pistol'; nextSpawn=0; nextShot=0; boostEnds=0; bombCooldownUntil=0;
+    updateHud();
+  }
+  function updateHud() {
+    hpEl.textContent=`❤️ HP: ${Math.max(0,player.hp)} / ${player.maxHp}`;
+    ammoEl.textContent=`🔸 弾薬: ${ammo}`;
+    scoreEl.textContent=`スコア: ${score}　撃破: ${kills}`;
+    weaponsEl.innerHTML = `<div class="${weapon==='pistol'?'active':''}">🔫 ピストル</div>`+
+      (shotgunUnlocked ? `<div class="${weapon==='shotgun'?'active':''}">💥 散弾銃</div>` : `<div class="locked">💥 散弾銃（あと ${Math.max(0,20-kills)} 体）</div>`) +
+      (rifleUnlocked ? `<div class="${weapon==='rifle'?'active':''}">🔥 アサルトライフル</div>` : `<div class="locked">🔥 アサルトライフル（あと ${Math.max(0,40-kills)} 体）</div>`);
+  }
+  function showNotice(text) { noticeEl.textContent=text; noticeEl.style.opacity=1; clearTimeout(noticeTimer); noticeTimer=setTimeout(()=>noticeEl.style.opacity=0,2600); }
+  
+  window.addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; if(['1','2','3'].includes(e.key)) switchWeapon(e.key); if(e.key==='e'||e.key==='q') handleBombAction(); });
+  window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+  
+  function getCanvasPos(e) {
+    const rect = canvas.getBoundingClientRect();
+    const clientX = e.touches ? e.touches.clientX : e.clientX;
+    const clientY = e.touches ? e.touches.clientY : e.clientY;
+    return { x: (clientX - rect.left) * (W / rect.width), y: (clientY - rect.top) * (H / rect.height) };
+  }
+  
+  window.addEventListener('mousemove', e => { const p = getCanvasPos(e); mouse.x = p.x; mouse.y = p.y; });
+  canvas.addEventListener('mousedown', () => mouse.down = true);
+  window.addEventListener('mouseup', () => mouse.down = false);
+
+  function switchWeapon(num) {
+    if(num === '1') weapon = 'pistol';
+    if(num === '2' && shotgunUnlocked) weapon = 'shotgun';
+    if(num === '3' && rifleUnlocked) weapon = 'rifle';
+    updateHud();
+  }
+
+  const joystickZone = document.querySelector('#joystick-zone');
+  const joystickStick = document.querySelector('#joystick-stick');
+  let joystickActive = false, joyStart = {x:0, y:0};
+
+  joystickZone.addEventListener('touchstart', e => { isMobile = true; joystickActive = true; joyStart = { x: e.touches[0].clientX, y: e.touches[0].clientY }; });
+  window.addEventListener('touchmove', e => {
+    if (!joystickActive) return;
+    let dx = e.touches[0].clientX - joyStart.x;
+    let dy = e.touches[0].clientY - joyStart.y;
+    const dist = Math.hypot(dx, dy);
+    const maxDist = 40;
+    if (dist > maxDist) { dx = (dx / dist) * maxDist; dy = (dy / dist) * maxDist; }
+    joystickStick.style.transform = `translate(${dx}px, ${dy}px)`;
+    touchInput.x = dx / maxDist; touchInput.y = dy / maxDist;
+  });
+  window.addEventListener('touchend', () => { joystickActive = false; joystickStick.style.transform = 'translate(0px, 0px)'; touchInput = { x: 0, y: 0 }; });
+
+  document.querySelector('#btn-shoot').addEventListener('touchstart', e => { e.preventDefault(); mouse.down = true; });
+  document.querySelector('#btn-shoot').addEventListener('touchend', e => { e.preventDefault(); mouse.down = false; });
+  
+  function handleBombAction() {
+    if(!bomb && performance.now() >= bombCooldownUntil) { bomb = {x:player.x, y:player.y, r:120}; } 
+    else if(bomb) {
+      aoeEffects.push({x:bomb.x, y:bomb.y, r:bomb.r, maxR:bomb.r, duration:300, start:performance.now()});
+      enemies.forEach(en => { if(Math.hypot(en.x-bomb.x, en.y-bomb.y) < bomb.r) en.hp -= 10; });
+      bomb = null; bombCooldownUntil = performance.now() + 5000; updateHud();
+    }
+  }
+  document.querySelector('#btn-bomb').addEventListener('touchstart', e => { e.preventDefault(); handleBombAction(); });
+  document.querySelector('#btn-weapon').addEventListener('touchstart', e => {
+    e.preventDefault();
+    const weapons = ['pistol'];
+    if(shotgunUnlocked) weapons.push('shotgun');
+    if(rifleUnlocked) weapons.push('rifle');
+    let nextIdx = (weapons.indexOf(weapon) + 1) % weapons.length;
+    weapon = weapons[nextIdx]; updateHud();
+  });
+
+  function shoot() {
+    if (!running || performance.now() < nextShot || ammo <= 0) return;
+    let pelletCount = weapon === 'shotgun' ? 5 : 1;
+    let spread = weapon === 'shotgun' ? 0.35 : weapon === 'rifle' ? 0.1 : 0;
+    let delay = weapon === 'rifle' ? 120 : weapon === 'shotgun' ? 700 : 350;
+    
+    for(let i=0; i<pelletCount; i++) {
+      let a = player.angle + (Math.random() - 0.5) * spread;
+      bullets.push({x:player.x, y:player.y, vx:Math.cos(a)*500, vy:Math.sin(a)*500, r:4});
+    }
+    ammo--; updateHud();
+    nextShot = performance.now() + delay;
+  }
+
+  function updatePlayer(dt) {
+    let dx = 0, dy = 0;
+    if (keys['w'] || keys['arrowup']) dy -= 1;
+    if (keys['s'] || keys['arrowdown']) dy += 1;
+    if (keys['a'] || keys['arrowleft']) dx -= 1;
+    if (keys['d'] || keys['arrowright']) dx += 1;
+    if (touchInput.x !== 0 || touchInput.y !== 0) { dx = touchInput.x; dy = touchInput.y; }
+
+    if (dx !== 0 || dy !== 0) {
+      const len = Math.hypot(dx, dy);
+      const speed = 180;
+      player.x = Math.max(player.r, Math.min(W - player.r, player.x + (dx / len) * speed * dt));
+      player.y = Math.max(player.r, Math.min(H - player.r, player.y + (dy / len) * speed * dt));
+    }
+    if (isMobile && (dx !== 0 || dy !== 0)) { player.angle = Math.atan2(dy, dx); } 
+    else { player.angle = Math.atan2(mouse.y - player.y, mouse.x - player.x); }
+    if (player.invincible > 0) player.invincible -= dt;
+  }
+
+  function spawnEnemy() {
+    const edge = Math.floor(Math.random()*4);
+    const p = edge===0?{x:Math.random()*W,y:-30}:edge===1?{x:W+30,y:Math.random()*H}:edge===2?{x:Math.random()*W,y:H+30}:{x:-30,y:Math.random()*H};
+    const elite = kills >= 30 && Math.random() < 0.2;
+    enemies.push({x:p.x, y:p.y, r:elite?20:14, speed:(elite?45:60)+Math.min(60,kills*1.2), hp:elite?5:1, maxHp:elite?5:1, elite});
+  }
+
+  function loop(ts) {
+    if (!running) return;
+    const dt = Math.min((ts - last) / 1000, 0.1); last = ts;
+    updatePlayer(dt);
+    if (mouse.down) shoot();
+    if (ts > nextSpawn) { spawnEnemy(); nextSpawn = ts + Math.max(350, 1400 - kills * 25); }
+
+    enemies.forEach((en, i) => {
+      const a = Math.atan2(player.y - en.y, player.x - en.x);
+      en.x += Math.cos(a) * en.speed * dt; en.y += Math.sin(a) * en.speed * dt;
+      if (Math.hypot(player.x - en.x, player.y - en.y) < player.r + en.r && player.invincible <= 0) {
+        player.hp--; player.invincible = 1.0; updateHud();
+        if(player.hp <= 0) { running = false; overlay.style.display = 'grid'; document.querySelector('#overlay h1').textContent = '💀 GAME OVER'; }
+      }
+    });
+
+    bullets.forEach((b, bi) => {
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      if(b.x<0||b.x>W||b.y<0||b.y>H) { bullets.splice(bi,1); return; }
+      enemies.forEach((en, ei) => {
+        if (Math.hypot(b.x - en.x, b.y - en.y) < b.r + en.r) {
+          en.hp--; try{bullets.splice(bi, 1);}catch(e){}
+          if (en.hp <= 0) {
+            enemies.splice(ei, 1); kills++; score += en.elite ? 50 : 10; ammo += en.elite ? 10 : 2;
+            if (kills === 20) { shotgunUnlocked = true; showNotice("💥 散弾銃アンロック！"); }
+            if (kills === 40) { rifleUnlocked = true; showNotice("🔥 アサルトライフルアンロック！"); }
+            updateHud();
+          }
+        }
+      });
+    });
+
+    ctx.clearRect(0, 0, W, H);
+    floorDust.forEach(d => { ctx.fillStyle = `rgba(255,255,255,${d.a})`; ctx.fillRect(d.x, d.y, d.r, d.r); });
+    if(bomb) { ctx.strokeStyle = 'rgba(255,0,0,0.5)'; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(bomb.x, bomb.y, bomb.r, 0, Math.PI*2); ctx.stroke(); }
+    aoeEffects.forEach((ef, i) => {
+      ctx.fillStyle = 'rgba(255,100,0,0.3)'; ctx.beginPath(); ctx.arc(ef.x, ef.y, ef.maxR, 0, Math.PI*2); ctx.fill();
+      if(performance.now() - ef.start > ef.duration) aoeEffects.splice(i, 1);
+    });
+
+    ctx.save(); ctx.translate(player.x, player.y); ctx.rotate(player.angle);
+    ctx.fillStyle = player.invincible > 0 ? 'rgba(255,255,255,0.4)' : '#4ae290';
+    ctx.beginPath(); ctx.arc(0, 0, player.r, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#000'; ctx.fillRect(8, -4, 5, 8); ctx.restore();
+
+    enemies.forEach(en => { ctx.fillStyle = en.elite ? '#b53c3c' : '#735135'; ctx.beginPath(); ctx.arc(en.x, en.y, en.r, 0, Math.PI*2); ctx.fill(); });
+    ctx.fillStyle = '#ffd65a'; bullets.forEach(b => { ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI*2); ctx.fill(); });
+
+    timeEl.textContent = `生存: ${Math.floor((ts - startAt) / 1000)}秒`;
+    requestAnimationFrame(loop);
+  }
+
+  document.querySelector('#start').addEventListener('click', () => { overlay.style.display = 'none'; reset(); running = true; startAt = performance.now(); last = startAt; nextSpawn = startAt + 1000; requestAnimationFrame(loop); });
+  reset();
+})();
+</script>
+</body>
+</html>
